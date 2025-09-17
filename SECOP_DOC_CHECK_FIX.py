@@ -22,9 +22,9 @@ from tkinter import filedialog, messagebox
 PROJECT_NAME = "SECOP II DOC CHECK"
 REPORT_FOLDER_NAME = "SECOP_DOC_CHECK"
 
-MAX_PATH_DEFAULT = 240
+MAX_PATH_DEFAULT = 240          # Se mide relativo a la raíz seleccionada/carpeta base
 MAX_FILE_NAME_DEFAULT = 100
-MAX_DEPTH_DEFAULT = 10   # límite de niveles desde la raíz corregida
+MAX_DEPTH_DEFAULT = 5           # Se mide después de la carpeta seleccionada (solo subniveles)
 
 # Reglas de recorte / nombres
 KEEP_SHORT_FILE = 10
@@ -115,6 +115,22 @@ def ensure_unique_generic(target_dir: Path, name: str) -> str:
         cand = limit_filename(f"{base}_{i}{ext}", MAX_FILE_NAME_DEFAULT); i += 1
     return cand
 
+# ---------- Métricas relativas a la raíz ----------
+def _rel_len(full_path: str, root: str) -> int:
+    """Longitud de la ruta relativa (incluye separadores) desde root hacia adelante."""
+    rel = os.path.relpath(full_path, root)
+    return 0 if rel in ('.', '') else len(rel)
+
+def _rel_join_len(dir_path: Path, name: str, base_root: Path) -> int:
+    """
+    Longitud que tendría 'dir_path/name' contada *desde* base_root (solo subruta).
+    Equivale a len(rel_dir) + (sep si aplica) + len(name).
+    """
+    rel_dir = os.path.relpath(str(dir_path), str(base_root))
+    if rel_dir in ('.', ''):
+        return len(name)
+    return len(rel_dir) + 1 + len(name)  # +1 por separador entre rel_dir y name
+
 # ---------- Profundidad ----------
 def rel_depth(full_path: str, root: str) -> int:
     rel = os.path.relpath(full_path, root)
@@ -133,22 +149,27 @@ def bubble_file_for_maxdepth(target_dir: Path, floor_dir: Path) -> Path:
         target_dir = target_dir.parent
     return target_dir
 
-# ---------- MaxPath ----------
+# ---------- MaxPath (relativo a la raíz) ----------
 def fit_in_maxpath_bubbling(target_dir: Path, floor_dir: Path, name: str, keep_C_suffix: bool):
-    """Si dir/name excede MaxPath: sube al padre; si aún excede, recorta el nombre (respetando 'C' si aplica)."""
+    """
+    Controla MaxPath RELATIVO: si (rel(floor_dir→target_dir/name)) excede MaxPath,
+    sube al padre; si aún excede, recorta el nombre (respetando 'C' si aplica).
+    """
     def _ensure_unique(d: Path, n: str) -> str:
         return ensure_unique_preserving_C(d, n) if keep_C_suffix else ensure_unique_generic(d, n)
 
     cur_dir, cur_name = target_dir, name
-    cur_path = cur_dir / cur_name
-    while len(str(cur_path)) > MAX_PATH_DEFAULT and cur_dir != floor_dir:
+    while _rel_join_len(cur_dir, cur_name, floor_dir) > MAX_PATH_DEFAULT and cur_dir != floor_dir:
         cur_dir = cur_dir.parent
-        cur_name = _ensure_unique(cur_dir, cur_name)
-        cur_path = cur_dir / cur_name
+        cur_name = _ensure_unique(cur_dir, cur_name)  # por si hay colisiones al subir
 
-    if len(str(cur_path)) > MAX_PATH_DEFAULT:
-        allowed = MAX_PATH_DEFAULT - len(str(cur_dir)) - 1
+    if _rel_join_len(cur_dir, cur_name, floor_dir) > MAX_PATH_DEFAULT:
+        rel_dir = os.path.relpath(str(cur_dir), str(floor_dir))
+        rel_dir_len = 0 if rel_dir in ('.', '') else len(rel_dir)
+        sep = 0 if rel_dir_len == 0 else 1
+        allowed = MAX_PATH_DEFAULT - rel_dir_len - sep
         if allowed < 1: allowed = 1
+
         base, ext = (os.path.splitext(cur_name) if "." in cur_name and not cur_name.startswith(".") else (cur_name, ""))
         if keep_C_suffix:
             has_c = base.endswith(SUFFIX_C)
@@ -158,7 +179,9 @@ def fit_in_maxpath_bubbling(target_dir: Path, floor_dir: Path, name: str, keep_C
         else:
             keep = max(1, allowed - len(ext))
             cur_name = (base[:keep] or "_") + ext
+
         cur_name = _ensure_unique(cur_dir, cur_name)
+
     return cur_dir, cur_name
 
 def fit_dirname_in_maxpath_bubbling(parent_dir: Path, floor_dir: Path, name: str):
@@ -166,12 +189,16 @@ def fit_dirname_in_maxpath_bubbling(parent_dir: Path, floor_dir: Path, name: str
 
 # ======= Validación (reportes) =======
 def _validate_item(name, full, tipo, root, counts):
-    plen, nlen, depth = len(full), len(name), rel_depth(full, root)
+    # Longitud de ruta ahora RELATIVA a 'root'
+    plen = _rel_len(full, root)
+    nlen = len(name)
+    depth = rel_depth(full, root)
+
     issues = []
     if FORBIDDEN_RE.search(name):
         issues.append('CaracteresProhibidos'); counts['forbidden_chars'] += 1
     if DIACRITICS_RE.search(name):
-        issues.append('Diacriticos'); counts['diacritics'] += 1
+        issues.append('Diacríticos'); counts['diacritics'] += 1
     if plen > MAX_PATH_DEFAULT:
         issues.append('Ruta>MaxPath'); counts['too_long_path'] += 1
     if nlen > MAX_FILE_NAME_DEFAULT:
@@ -180,6 +207,7 @@ def _validate_item(name, full, tipo, root, counts):
         issues.append('Profundidad>MaxDepth'); counts['too_deep'] += 1
     if name in HIDDEN_BASENAMES or name.startswith('~$'):
         issues.append('Oculto/Temporal'); counts['hidden_temp'] += 1
+
     order = {'CaracteresProhibidos': 0, 'Diacríticos': 1, 'Ruta>MaxPath': 2,
              'Nombre>MaxFileName': 3, 'Profundidad>MaxDepth': 4, 'Oculto/Temporal': 5}
     issues.sort(key=lambda x: order.get(x, 99))
@@ -377,7 +405,6 @@ def prune_empty_dirs(root: Path, keep_root: bool = True) -> int:
         p = Path(dirpath)
         if keep_root and p == root:
             continue
-        # cuenta como vacío si no quedan ficheros ni subcarpetas
         try:
             if not any(p.iterdir()):
                 p.rmdir()
@@ -418,7 +445,7 @@ def copy_with_rules_and_convert(src_root: Path, out_parent: Path):
             key10 = (clean[:KEEP_SHORT_DIR] or "_")
             name10C = limit_filename(key10 + SUFFIX_C, MAX_FILE_NAME_DEFAULT)
 
-            # Burbujeo por MaxPath al crear la carpeta
+            # Burbujeo por MaxPath al crear la carpeta (RELATIVO a base_dest)
             candidate = ensure_unique_preserving_C(dest_parent, name10C)
             dest_parent_final, candidate_final = fit_dirname_in_maxpath_bubbling(dest_parent, base_dest, candidate)
             dest_dir = dest_parent_final / candidate_final
@@ -455,7 +482,7 @@ def copy_with_rules_and_convert(src_root: Path, out_parent: Path):
                 out_name = limit_filename(base_clean + SUFFIX_C + ext_clean, MAX_FILE_NAME_DEFAULT)
                 out_name = ensure_unique_preserving_C(dir_map[cur], out_name)
 
-                # BURBUJEO por MaxDepth (+1 por archivo) y luego MaxPath
+                # BURBUJEO por MaxDepth (+1 por archivo) y luego MaxPath (RELATIVO)
                 depth_ok_dir = bubble_file_for_maxdepth(dir_map[cur], base_dest)
                 dest_dir_final, out_name_final = fit_in_maxpath_bubbling(
                     target_dir=depth_ok_dir, floor_dir=base_dest, name=out_name, keep_C_suffix=True
@@ -525,7 +552,7 @@ def save_reports_with_label(results, counts, out_dir: Path, selected_root, label
     path_rows       = filter_by('Ruta>MaxPath')
     name_rows       = filter_by('Nombre>MaxFileName')
     depth_rows      = filter_by('Profundidad>MaxDepth')
-    hidden_rows     = filter_by('Oculto/Temporales')
+    hidden_rows     = filter_by('Oculto/Temporal')
 
     def render_table(title, rows, action):
         if not rows:
@@ -573,7 +600,7 @@ code {{ background:#f1f1f1; padding:2px 4px; }}
 <ul>
   <li>Caracteres prohibidos (regex): <code>{FORBIDDEN_CHARS_PATTERN}</code></li>
   <li>Diacríticos (regex): <code>{DIACRITIC_CHARS_PATTERN}</code></li>
-  <li>MaxPath: <code>{MAX_PATH_DEFAULT}</code></li>
+  <li>MaxPath: <code>{MAX_PATH_DEFAULT}</code> (relativo a la raíz)</li>
   <li>MaxFileName: <code>{MAX_FILE_NAME_DEFAULT}</code></li>
   <li>MaxDepth: <code>{MAX_DEPTH_DEFAULT}</code></li>
   <li>Prefijo fusión carpetas: <code>{KEEP_SHORT_DIR}</code></li>
@@ -729,7 +756,7 @@ def run_gui():
         if messagebox.askyesno(PROJECT_NAME, "¿Crear COPIA corregida (profundidad y path controlados) y convertir a PDF?"):
             mapping, corrected_root, dump_dir = copy_with_rules_and_convert(Path(selected), parent)
 
-            # --- NUEVO: eliminar carpetas vacías en corregida y dump ---
+            # Eliminar carpetas vacías en corregida y dump
             removed_corr = prune_empty_dirs(corrected_root, keep_root=True)
             removed_dump = prune_empty_dirs(dump_dir, keep_root=True)
 
@@ -770,3 +797,4 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
+
