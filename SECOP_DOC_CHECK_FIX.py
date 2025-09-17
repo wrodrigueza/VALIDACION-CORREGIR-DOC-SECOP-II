@@ -24,7 +24,7 @@ REPORT_FOLDER_NAME = "SECOP_DOC_CHECK"
 
 MAX_PATH_DEFAULT = 240
 MAX_FILE_NAME_DEFAULT = 100
-MAX_DEPTH_DEFAULT = 5   # límite de niveles desde la raíz corregida
+MAX_DEPTH_DEFAULT = 10   # límite de niveles desde la raíz corregida
 
 # Reglas de recorte / nombres
 KEEP_SHORT_FILE = 10
